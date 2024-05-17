@@ -10,7 +10,8 @@ import qm9.utils as qm9utils
 from qm9 import losses
 import time
 import torch
-
+import math
+import tqdm
 
 def kerras_boundaries(sigma, eps, N, T):
     # This will be used to generate the boundaries for the time discretization
@@ -27,15 +28,13 @@ def train_epoch_consistency(args, loader, epoch, model, model_dp, model_ema, ema
     model_dp.train()
     model.train()
     loss_ema = None
+    loss_epoch = []
+    nll_epoch = []
 
-    import math
     N = math.ceil(math.sqrt(((epoch + 1) * (150 ** 2 - 4) / args.n_epochs) + 4) - 1) + 1
-    print(epoch, args.n_epochs)
-    print(N)
     boundaries = kerras_boundaries(7.0, 0.002, N, model.T).to(device)
-    print(boundaries)
 
-    for i, data in enumerate(loader):
+    for i, data in tqdm.tqdm(enumerate(loader)):
         x = data['positions'].to(device, dtype)
         node_mask = data['atom_mask'].to(device, dtype).unsqueeze(2)
         edge_mask = data['edge_mask'].to(device, dtype)
@@ -65,8 +64,9 @@ def train_epoch_consistency(args, loader, epoch, model, model_dp, model_ema, ema
             context = None
 
         optim.zero_grad()
-        loss = losses.compute_loss_and_nll_consistency(args, model_dp, model_ema, nodes_dist, x, h, node_mask,
-                                                       edge_mask, context, boundaries, N)
+        nll, reg_term, mean_abs_z, loss = losses.compute_loss_and_nll_consistency(args, model_dp, model_ema, nodes_dist,
+                                                                                  x, h, node_mask, edge_mask, context,
+                                                                                  boundaries, N)
         loss.backward()
         optim.step()
 
@@ -75,13 +75,13 @@ def train_epoch_consistency(args, loader, epoch, model, model_dp, model_ema, ema
             loss_ema = loss.item()
         else:
             loss_ema = 0.9 * loss_ema + 0.1 * loss.item()
-        print(loss_ema)
 
         # Update EMA if enabled.
         if args.ema_decay > 0:
             with torch.no_grad():
                 ema.update_model_average(model_ema, model)
-
+        loss_epoch.append(loss.item())
+        nll_epoch.append(nll.item())
         if (epoch % args.test_epochs == 0) and (i % args.visualize_every_batch == 0) and not (epoch == 0 and i == 0):
             start = time.time()
             if len(args.conditioning) > 0:
@@ -97,8 +97,12 @@ def train_epoch_consistency(args, loader, epoch, model, model_dp, model_ema, ema
             if len(args.conditioning) > 0:
                 vis.visualize_chain("outputs/%s/epoch_%d/conditional/" % (args.exp_name, epoch), dataset_info,
                                     wandb=wandb, mode='conditional')
+        wandb.log({"Batch LOSS": loss.item()}, commit=True)
+        wandb.log({"Batch nll": nll.item()}, commit=True)
         if args.break_train_epoch:
             break
+    wandb.log({"Train Epoch LOSS": np.mean(loss_epoch)}, commit=False)
+    wandb.log({"Train Epoch nll": np.mean(nll_epoch)}, commit=False)
 
 
 def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dtype, property_norms, optim,
