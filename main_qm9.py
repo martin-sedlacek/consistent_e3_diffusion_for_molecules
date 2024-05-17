@@ -18,7 +18,7 @@ import torch
 import time
 import pickle
 from qm9.utils import prepare_context, compute_mean_mad
-from train_test import train_epoch, test, analyze_and_save
+from train_test import train_epoch, train_epoch_consistency, test, analyze_and_save
 
 parser = argparse.ArgumentParser(description='E3Diffusion')
 parser.add_argument('--exp_name', type=str, default='debug_10')
@@ -117,6 +117,10 @@ parser.add_argument('--aggregation_method', type=str, default='sum',
                     help='"sum" or "mean"')
 args = parser.parse_args()
 
+# TODO: this is form consistency models
+args.ema_decay = 0.9
+args.consistency = True
+
 dataset_info = get_dataset_info(args.dataset, args.remove_h)
 
 atom_encoder = dataset_info['atom_encoder']
@@ -126,7 +130,7 @@ atom_decoder = dataset_info['atom_decoder']
 args.wandb_usr = utils.get_wandb_username(args.wandb_usr)
 
 args.cuda = not args.no_cuda and torch.cuda.is_available()
-device = torch.device("cuda" if args.cuda else "cpu")
+device = torch.device("cpu") # TODO: torch.device("cuda" if args.cuda else "cpu")
 dtype = torch.float32
 
 if args.resume is not None:
@@ -189,6 +193,7 @@ args.context_node_nf = context_node_nf
 
 # Create EGNN flow
 model, nodes_dist, prop_dist = get_model(args, device, dataset_info, dataloaders['train'])
+
 if prop_dist is not None:
     prop_dist.set_normalizer(property_norms)
 model = model.to(device)
@@ -238,10 +243,16 @@ def main():
     best_nll_test = 1e8
     for epoch in range(args.start_epoch, args.n_epochs):
         start_epoch = time.time()
-        train_epoch(args=args, loader=dataloaders['train'], epoch=epoch, model=model, model_dp=model_dp,
+        if args.consistency:
+            train_epoch_consistency(args=args, loader=dataloaders['train'], epoch=epoch, model=model, model_dp=model_dp,
                     model_ema=model_ema, ema=ema, device=device, dtype=dtype, property_norms=property_norms,
                     nodes_dist=nodes_dist, dataset_info=dataset_info,
                     gradnorm_queue=gradnorm_queue, optim=optim, prop_dist=prop_dist)
+        else:
+            train_epoch(args=args, loader=dataloaders['train'], epoch=epoch, model=model, model_dp=model_dp,
+                        model_ema=model_ema, ema=ema, device=device, dtype=dtype, property_norms=property_norms,
+                        nodes_dist=nodes_dist, dataset_info=dataset_info,
+                        gradnorm_queue=gradnorm_queue, optim=optim, prop_dist=prop_dist)
         print(f"Epoch took {time.time() - start_epoch:.1f} seconds.")
 
         if epoch % args.test_epochs == 0:

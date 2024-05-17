@@ -12,6 +12,95 @@ import time
 import torch
 
 
+def kerras_boundaries(sigma, eps, N, T):
+    # This will be used to generate the boundaries for the time discretization
+
+    return torch.tensor(
+        [
+            (eps ** (1 / sigma) + i / (N - 1) * (T ** (1 / sigma) - eps ** (1 / sigma))) ** sigma for i in range(N)
+        ]
+    )
+
+
+def train_epoch_consistency(args, loader, epoch, model, model_dp, model_ema, ema, device, dtype, property_norms, optim,
+                nodes_dist, gradnorm_queue, dataset_info, prop_dist):
+    model_dp.train()
+    model.train()
+    loss_ema = None
+
+    import math
+    N = math.ceil(math.sqrt(((epoch + 1) * (150 ** 2 - 4) / args.n_epochs) + 4) - 1) + 1
+    print(epoch, args.n_epochs)
+    print(N)
+    boundaries = kerras_boundaries(7.0, 0.002, N, model.T).to(device)
+    print(boundaries)
+
+    for i, data in enumerate(loader):
+        x = data['positions'].to(device, dtype)
+        node_mask = data['atom_mask'].to(device, dtype).unsqueeze(2)
+        edge_mask = data['edge_mask'].to(device, dtype)
+        one_hot = data['one_hot'].to(device, dtype)
+        charges = (data['charges'] if args.include_charges else torch.zeros(0)).to(device, dtype)
+
+        x = remove_mean_with_mask(x, node_mask)
+
+        if args.augment_noise > 0:
+            # Add noise eps ~ N(0, augment_noise) around points.
+            eps = sample_center_gravity_zero_gaussian_with_mask(x.size(), x.device, node_mask)
+            x = x + eps * args.augment_noise
+
+        x = remove_mean_with_mask(x, node_mask)
+        if args.data_augmentation:
+            x = utils.random_rotation(x).detach()
+
+        check_mask_correct([x, one_hot, charges], node_mask)
+        assert_mean_zero_with_mask(x, node_mask)
+
+        h = {'categorical': one_hot, 'integer': charges}
+
+        if len(args.conditioning) > 0:
+            context = qm9utils.prepare_context(args.conditioning, data, property_norms).to(device, dtype)
+            assert_correctly_masked(context, node_mask)
+        else:
+            context = None
+
+        optim.zero_grad()
+        loss = losses.compute_loss_and_nll_consistency(args, model_dp, model_ema, nodes_dist, x, h, node_mask,
+                                                       edge_mask, context, boundaries, N)
+        loss.backward()
+        optim.step()
+
+        # TODO: why report this loss?
+        if loss_ema is None:
+            loss_ema = loss.item()
+        else:
+            loss_ema = 0.9 * loss_ema + 0.1 * loss.item()
+        print(loss_ema)
+
+        # Update EMA if enabled.
+        if args.ema_decay > 0:
+            with torch.no_grad():
+                ema.update_model_average(model_ema, model)
+
+        if (epoch % args.test_epochs == 0) and (i % args.visualize_every_batch == 0) and not (epoch == 0 and i == 0):
+            start = time.time()
+            if len(args.conditioning) > 0:
+                save_and_sample_conditional(args, device, model_ema, prop_dist, dataset_info, epoch=epoch)
+            save_and_sample_chain(model_ema, args, device, dataset_info, prop_dist, epoch=epoch,
+                                  batch_id=str(i))
+            sample_different_sizes_and_save(model_ema, nodes_dist, args, device, dataset_info,
+                                            prop_dist, epoch=epoch)
+            print(f'Sampling took {time.time() - start:.2f} seconds')
+
+            vis.visualize(f"outputs/{args.exp_name}/epoch_{epoch}_{i}", dataset_info=dataset_info, wandb=wandb)
+            vis.visualize_chain(f"outputs/{args.exp_name}/epoch_{epoch}_{i}/chain/", dataset_info, wandb=wandb)
+            if len(args.conditioning) > 0:
+                vis.visualize_chain("outputs/%s/epoch_%d/conditional/" % (args.exp_name, epoch), dataset_info,
+                                    wandb=wandb, mode='conditional')
+        if args.break_train_epoch:
+            break
+
+
 def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dtype, property_norms, optim,
                 nodes_dist, gradnorm_queue, dataset_info, prop_dist):
     model_dp.train()

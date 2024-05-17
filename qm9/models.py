@@ -31,20 +31,33 @@ def get_model(args, device, dataset_info, dataloader_train):
         normalization_factor=args.normalization_factor, aggregation_method=args.aggregation_method)
 
     if args.probabilistic_model == 'diffusion':
-        vdm = EnVariationalDiffusion(
-            dynamics=net_dynamics,
-            in_node_nf=in_node_nf,
-            n_dims=3,
-            timesteps=args.diffusion_steps,
-            noise_schedule=args.diffusion_noise_schedule,
-            noise_precision=args.diffusion_noise_precision,
-            loss_type=args.diffusion_loss_type,
-            norm_values=args.normalize_factors,
-            include_charges=args.include_charges
-            )
-
-        return vdm, nodes_dist, prop_dist
-
+        if args.consistency:
+            from equivariant_diffusion.en_diffusion_consistency import ConsistentEnVariationalDiffusion
+            cvdm = ConsistentEnVariationalDiffusion(
+                dynamics=net_dynamics,
+                in_node_nf=in_node_nf,
+                n_dims=3,
+                timesteps=args.diffusion_steps,
+                noise_schedule=args.diffusion_noise_schedule,
+                noise_precision=args.diffusion_noise_precision,
+                loss_type=args.diffusion_loss_type,
+                norm_values=args.normalize_factors,
+                include_charges=args.include_charges
+                )
+            return cvdm, nodes_dist, prop_dist
+        else:
+            vdm = EnVariationalDiffusion(
+                dynamics=net_dynamics,
+                in_node_nf=in_node_nf,
+                n_dims=3,
+                timesteps=args.diffusion_steps,
+                noise_schedule=args.diffusion_noise_schedule,
+                noise_precision=args.diffusion_noise_precision,
+                loss_type=args.diffusion_loss_type,
+                norm_values=args.normalize_factors,
+                include_charges=args.include_charges
+                )
+            return vdm, nodes_dist, prop_dist
     else:
         raise ValueError(args.probabilistic_model)
 
