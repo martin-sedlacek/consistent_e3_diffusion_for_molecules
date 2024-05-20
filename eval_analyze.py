@@ -67,7 +67,7 @@ def analyze_and_save(args, eval_args, device, generative_model,
     return stability_dict, rdkit_metrics
 
 
-def test(args, flow_dp, nodes_dist, device, dtype, loader, partition='Test', num_passes=1):
+def test(args, flow_dp, nodes_dist, device, dtype, loader, partition='Test', num_passes=1, boundaries=None, N=None):
     flow_dp.eval()
     nll_epoch = 0
     n_samples = 0
@@ -96,7 +96,18 @@ def test(args, flow_dp, nodes_dist, device, dtype, loader, partition='Test', num
                     context = None
 
                 # transform batch through flow
-                nll, _, _ = losses.compute_loss_and_nll(args, flow_dp, nodes_dist, x, h, node_mask,
+                if args.consistency:
+                    from equivariant_diffusion.en_diffusion_consistency import DummyTestingEMA
+                    test_ema = DummyTestingEMA(
+                        n_dims=flow_dp.n_dims,
+                        loss_type=flow_dp.loss_type,
+                        norm_values=flow_dp.norm_values,
+                        norm_biases=flow_dp.norm_biases,
+                        include_charges=flow_dp.include_charges
+                    )
+                    nll, _, _ = losses.compute_loss_and_nll(args, flow_dp, nodes_dist, x, h, node_mask, edge_mask, context, generative_model_ema=test_ema, boundaries=boundaries, N=N)
+                else:
+                    nll, _, _ = losses.compute_loss_and_nll(args, flow_dp, nodes_dist, x, h, node_mask,
                                                         edge_mask, context)
                 # standard nll from forward KL
 

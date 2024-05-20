@@ -18,7 +18,9 @@ import torch
 import time
 import pickle
 from qm9.utils import prepare_context, compute_mean_mad
-from train_test import train_epoch, train_epoch_consistency, test, analyze_and_save
+from train_test import train_epoch, test, analyze_and_save
+import math
+from train_test import kerras_boundaries
 
 parser = argparse.ArgumentParser(description='E3Diffusion')
 parser.add_argument('--exp_name', type=str, default='debug_10')
@@ -29,7 +31,7 @@ parser.add_argument('--probabilistic_model', type=str, default='diffusion',
                     help='diffusion')
 
 # Training complexity is O(1) (unaffected), but sampling complexity is O(steps).
-parser.add_argument('--diffusion_steps', type=int, default=500)
+parser.add_argument('--diffusion_steps', type=int, default=110)  # 500
 parser.add_argument('--diffusion_noise_schedule', type=str, default='polynomial_2',
                     help='learned, cosine')
 parser.add_argument('--diffusion_noise_precision', type=float, default=1e-5,
@@ -117,7 +119,7 @@ parser.add_argument('--aggregation_method', type=str, default='sum',
                     help='"sum" or "mean"')
 args = parser.parse_args()
 
-# TODO: this is form consistency models
+# TODO: this is for consistency models
 args.ema_decay = 0.9
 args.consistency = True
 
@@ -130,7 +132,7 @@ atom_decoder = dataset_info['atom_decoder']
 args.wandb_usr = utils.get_wandb_username(args.wandb_usr)
 
 args.cuda = not args.no_cuda and torch.cuda.is_available()
-device = torch.device("cuda" if args.cuda else "cpu") # TODO: torch.device("cuda" if args.cuda else "cpu")
+device = torch.device("cuda" if args.cuda else "cpu")
 dtype = torch.float32
 
 if args.resume is not None:
@@ -241,18 +243,23 @@ def main():
 
     best_nll_val = 1e8
     best_nll_test = 1e8
+
     for epoch in range(args.start_epoch, args.n_epochs):
         start_epoch = time.time()
+
         if args.consistency:
-            train_epoch_consistency(args=args, loader=dataloaders['train'], epoch=epoch, model=model, model_dp=model_dp,
-                    model_ema=model_ema, ema=ema, device=device, dtype=dtype, property_norms=property_norms,
-                    nodes_dist=nodes_dist, dataset_info=dataset_info,
-                    gradnorm_queue=gradnorm_queue, optim=optim, prop_dist=prop_dist)
+            N = math.ceil(math.sqrt(((epoch + 1) * (150 ** 2 - 4) / args.n_epochs) + 4) - 1) + 1
+            boundaries = kerras_boundaries(7.0, 0.002, N, model.T).to(device)
+            wandb.log({"N": N}, commit=True)
+            print("Boudnaries:", boundaries)
         else:
-            train_epoch(args=args, loader=dataloaders['train'], epoch=epoch, model=model, model_dp=model_dp,
-                        model_ema=model_ema, ema=ema, device=device, dtype=dtype, property_norms=property_norms,
-                        nodes_dist=nodes_dist, dataset_info=dataset_info,
-                        gradnorm_queue=gradnorm_queue, optim=optim, prop_dist=prop_dist)
+            N = None
+            boundaries = None
+
+        train_epoch(args=args, loader=dataloaders['train'], epoch=epoch, model=model, model_dp=model_dp,
+                model_ema=model_ema, ema=ema, device=device, dtype=dtype, property_norms=property_norms,
+                nodes_dist=nodes_dist, dataset_info=dataset_info, gradnorm_queue=gradnorm_queue, optim=optim,
+                prop_dist=prop_dist, N=N, boundaries=boundaries)
         print(f"Epoch took {time.time() - start_epoch:.1f} seconds.")
 
         if epoch % args.test_epochs == 0:
@@ -263,12 +270,13 @@ def main():
                 analyze_and_save(args=args, epoch=epoch, model_sample=model_ema, nodes_dist=nodes_dist,
                                  dataset_info=dataset_info, device=device,
                                  prop_dist=prop_dist, n_samples=args.n_stability_samples)
+
             nll_val = test(args=args, loader=dataloaders['valid'], epoch=epoch, eval_model=model_ema_dp,
                            partition='Val', device=device, dtype=dtype, nodes_dist=nodes_dist,
-                           property_norms=property_norms)
+                           property_norms=property_norms, N=N, boundaries=boundaries)
             nll_test = test(args=args, loader=dataloaders['test'], epoch=epoch, eval_model=model_ema_dp,
-                            partition='Test', device=device, dtype=dtype,
-                            nodes_dist=nodes_dist, property_norms=property_norms)
+                            partition='Test', device=device, dtype=dtype, nodes_dist=nodes_dist,
+                            property_norms=property_norms, N=N, boundaries=boundaries)
 
             if nll_val < best_nll_val:
                 best_nll_val = nll_val

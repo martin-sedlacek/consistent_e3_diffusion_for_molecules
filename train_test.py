@@ -10,8 +10,8 @@ import qm9.utils as qm9utils
 from qm9 import losses
 import time
 import torch
-import math
 import tqdm
+
 
 def kerras_boundaries(sigma, eps, N, T):
     # This will be used to generate the boundaries for the time discretization
@@ -23,95 +23,16 @@ def kerras_boundaries(sigma, eps, N, T):
     )
 
 
-def train_epoch_consistency(args, loader, epoch, model, model_dp, model_ema, ema, device, dtype, property_norms, optim,
-                nodes_dist, gradnorm_queue, dataset_info, prop_dist):
-    model_dp.train()
-    model.train()
-    loss_ema = None
-    loss_epoch = []
-    nll_epoch = []
-
-    N = math.ceil(math.sqrt(((epoch + 1) * (150 ** 2 - 4) / args.n_epochs) + 4) - 1) + 1
-    boundaries = kerras_boundaries(7.0, 0.002, N, model.T).to(device)
-
-    for i, data in tqdm.tqdm(enumerate(loader)):
-        x = data['positions'].to(device, dtype)
-        node_mask = data['atom_mask'].to(device, dtype).unsqueeze(2)
-        edge_mask = data['edge_mask'].to(device, dtype)
-        one_hot = data['one_hot'].to(device, dtype)
-        charges = (data['charges'] if args.include_charges else torch.zeros(0)).to(device, dtype)
-
-        x = remove_mean_with_mask(x, node_mask)
-
-        if args.augment_noise > 0:
-            # Add noise eps ~ N(0, augment_noise) around points.
-            eps = sample_center_gravity_zero_gaussian_with_mask(x.size(), x.device, node_mask)
-            x = x + eps * args.augment_noise
-
-        x = remove_mean_with_mask(x, node_mask)
-        if args.data_augmentation:
-            x = utils.random_rotation(x).detach()
-
-        check_mask_correct([x, one_hot, charges], node_mask)
-        assert_mean_zero_with_mask(x, node_mask)
-
-        h = {'categorical': one_hot, 'integer': charges}
-
-        if len(args.conditioning) > 0:
-            context = qm9utils.prepare_context(args.conditioning, data, property_norms).to(device, dtype)
-            assert_correctly_masked(context, node_mask)
-        else:
-            context = None
-
-        optim.zero_grad()
-        nll, reg_term, mean_abs_z, loss = losses.compute_loss_and_nll_consistency(args, model_dp, model_ema, nodes_dist,
-                                                                                  x, h, node_mask, edge_mask, context,
-                                                                                  boundaries, N)
-        loss.backward()
-        optim.step()
-
-        # TODO: why report this loss?
-        if loss_ema is None:
-            loss_ema = loss.item()
-        else:
-            loss_ema = 0.9 * loss_ema + 0.1 * loss.item()
-
-        # Update EMA if enabled.
-        if args.ema_decay > 0:
-            with torch.no_grad():
-                ema.update_model_average(model_ema, model)
-        loss_epoch.append(loss.item())
-        nll_epoch.append(nll.item())
-        if (epoch % args.test_epochs == 0) and (i % args.visualize_every_batch == 0) and not (epoch == 0 and i == 0):
-            start = time.time()
-            if len(args.conditioning) > 0:
-                save_and_sample_conditional(args, device, model_ema, prop_dist, dataset_info, epoch=epoch)
-            save_and_sample_chain(model_ema, args, device, dataset_info, prop_dist, epoch=epoch,
-                                  batch_id=str(i))
-            sample_different_sizes_and_save(model_ema, nodes_dist, args, device, dataset_info,
-                                            prop_dist, epoch=epoch)
-            print(f'Sampling took {time.time() - start:.2f} seconds')
-
-            vis.visualize(f"outputs/{args.exp_name}/epoch_{epoch}_{i}", dataset_info=dataset_info, wandb=wandb)
-            vis.visualize_chain(f"outputs/{args.exp_name}/epoch_{epoch}_{i}/chain/", dataset_info, wandb=wandb)
-            if len(args.conditioning) > 0:
-                vis.visualize_chain("outputs/%s/epoch_%d/conditional/" % (args.exp_name, epoch), dataset_info,
-                                    wandb=wandb, mode='conditional')
-        wandb.log({"Batch LOSS": loss.item()}, commit=True)
-        wandb.log({"Batch nll": nll.item()}, commit=True)
-        if args.break_train_epoch:
-            break
-    wandb.log({"Train Epoch LOSS": np.mean(loss_epoch)}, commit=False)
-    wandb.log({"Train Epoch nll": np.mean(nll_epoch)}, commit=False)
-
-
 def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dtype, property_norms, optim,
-                nodes_dist, gradnorm_queue, dataset_info, prop_dist):
+                nodes_dist, gradnorm_queue, dataset_info, prop_dist, N=None, boundaries=None):
     model_dp.train()
     model.train()
     nll_epoch = []
     n_iterations = len(loader)
-    for i, data in enumerate(loader):
+    for i, data in tqdm.tqdm(enumerate(loader)):
+        # TODO; remove debug breaker
+        #if i == 100:
+        #    break
         x = data['positions'].to(device, dtype)
         node_mask = data['atom_mask'].to(device, dtype).unsqueeze(2)
         edge_mask = data['edge_mask'].to(device, dtype)
@@ -143,8 +64,10 @@ def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dt
         optim.zero_grad()
 
         # transform batch through flow
-        nll, reg_term, mean_abs_z = losses.compute_loss_and_nll(args, model_dp, nodes_dist,
-                                                                x, h, node_mask, edge_mask, context)
+        if args.consistency:
+            nll, reg_term, mean_abs_z = losses.compute_loss_and_nll(args, model_dp, nodes_dist, x, h, node_mask, edge_mask, context, model_ema, N, boundaries)
+        else:
+            nll, reg_term, mean_abs_z = losses.compute_loss_and_nll(args, model_dp, nodes_dist, x, h, node_mask, edge_mask, context)
         # standard nll from forward KL
         loss = nll + args.ode_regularization * reg_term
         loss.backward()
@@ -177,10 +100,10 @@ def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dt
             print(f'Sampling took {time.time() - start:.2f} seconds')
 
             vis.visualize(f"outputs/{args.exp_name}/epoch_{epoch}_{i}", dataset_info=dataset_info, wandb=wandb)
-            vis.visualize_chain(f"outputs/{args.exp_name}/epoch_{epoch}_{i}/chain/", dataset_info, wandb=wandb)
-            if len(args.conditioning) > 0:
-                vis.visualize_chain("outputs/%s/epoch_%d/conditional/" % (args.exp_name, epoch), dataset_info,
-                                    wandb=wandb, mode='conditional')
+            #vis.visualize_chain(f"outputs/{args.exp_name}/epoch_{epoch}_{i}/chain/", dataset_info, wandb=wandb)
+            #if len(args.conditioning) > 0:
+            #    vis.visualize_chain("outputs/%s/epoch_%d/conditional/" % (args.exp_name, epoch), dataset_info,
+            #                        wandb=wandb, mode='conditional')
         wandb.log({"Batch NLL": nll.item()}, commit=True)
         if args.break_train_epoch:
             break
@@ -193,7 +116,7 @@ def check_mask_correct(variables, node_mask):
             assert_correctly_masked(variable, node_mask)
 
 
-def test(args, loader, epoch, eval_model, device, dtype, property_norms, nodes_dist, partition='Test'):
+def test(args, loader, epoch, eval_model, device, dtype, property_norms, nodes_dist, partition='Test', N=None, boundaries=None):
     eval_model.eval()
     with torch.no_grad():
         nll_epoch = 0
@@ -202,6 +125,9 @@ def test(args, loader, epoch, eval_model, device, dtype, property_norms, nodes_d
         n_iterations = len(loader)
 
         for i, data in enumerate(loader):
+            # TODO remove breaker
+            #if i == 100:
+            #    break
             x = data['positions'].to(device, dtype)
             batch_size = x.size(0)
             node_mask = data['atom_mask'].to(device, dtype).unsqueeze(2)
@@ -229,8 +155,19 @@ def test(args, loader, epoch, eval_model, device, dtype, property_norms, nodes_d
                 context = None
 
             # transform batch through flow
-            nll, _, _ = losses.compute_loss_and_nll(args, eval_model, nodes_dist, x, h,
-                                                    node_mask, edge_mask, context)
+            if args.consistency:
+                from equivariant_diffusion.en_diffusion_consistency import DummyTestingEMA
+                test_ema = DummyTestingEMA(
+                    n_dims=eval_model.n_dims,
+                    loss_type=eval_model.loss_type,
+                    norm_values=eval_model.norm_values,
+                    norm_biases=eval_model.norm_biases,
+                    include_charges=eval_model.include_charges
+                )
+                nll, _, _ = losses.compute_loss_and_nll(args, eval_model, nodes_dist, x, h, node_mask, edge_mask, context,
+                                                        generative_model_ema=None, boundaries=boundaries, N=N)
+            else:
+                nll, _, _ = losses.compute_loss_and_nll(args, eval_model, nodes_dist, x, h, node_mask, edge_mask, context)
             # standard nll from forward KL
 
             nll_epoch += nll.item() * batch_size
@@ -242,8 +179,7 @@ def test(args, loader, epoch, eval_model, device, dtype, property_norms, nodes_d
     return nll_epoch/n_samples
 
 
-def save_and_sample_chain(model, args, device, dataset_info, prop_dist,
-                          epoch=0, id_from=0, batch_id=''):
+def save_and_sample_chain(model, args, device, dataset_info, prop_dist, epoch=0, id_from=0, batch_id=''):
     one_hot, charges, x = sample_chain(args=args, device=device, flow=model,
                                        n_tries=1, dataset_info=dataset_info, prop_dist=prop_dist)
 
