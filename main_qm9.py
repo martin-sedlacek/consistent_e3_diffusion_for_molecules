@@ -31,7 +31,7 @@ parser.add_argument('--probabilistic_model', type=str, default='diffusion',
                     help='diffusion')
 
 # Training complexity is O(1) (unaffected), but sampling complexity is O(steps).
-parser.add_argument('--diffusion_steps', type=int, default=110)  # 500
+parser.add_argument('--diffusion_steps', type=int, default=80)  # 500
 parser.add_argument('--diffusion_noise_schedule', type=str, default='polynomial_2',
                     help='learned, cosine')
 parser.add_argument('--diffusion_noise_precision', type=float, default=1e-5,
@@ -248,8 +248,10 @@ def main():
         start_epoch = time.time()
 
         if args.consistency:
+            args.sigma = 5.0  # 7.0
+            model.boundary_eps = 0.00000001  # 0.002
             N = math.ceil(math.sqrt(((epoch + 1) * (150 ** 2 - 4) / args.n_epochs) + 4) - 1) + 1
-            boundaries = kerras_boundaries(7.0, 0.002, N, model.T).to(device)
+            boundaries = kerras_boundaries(args.sigma, model.boundary_eps, N, args.diffusion_steps).to(device)
             wandb.log({"N": N}, commit=True)
             print("Boudnaries:", boundaries)
         else:

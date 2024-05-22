@@ -172,7 +172,7 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
 
         net_out = self.phi(z_t, t, node_mask, edge_mask, context)
 
-        orig_eps = 0.002
+        orig_eps = 0.00000001  # 0.002
         t = t_int - orig_eps  # should we use t_int or something else?
         c_skip_t = 0.25 / (t.pow(2) + 0.25)
         c_out_t = 0.25 * t / ((t + orig_eps).pow(2) + 0.25).pow(0.5)
@@ -208,6 +208,7 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
         return neg_log_pxh
 
     # TODO: this needs to work correctly for consistency models
+    # TODO: EcConf uses 30 step generation for best results ??
     @torch.no_grad()
     def sample(self, n_samples, n_nodes, node_mask, edge_mask, context, fix_noise=False):
         """
