@@ -28,7 +28,7 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
     ):
         super().__init__(dynamics, in_node_nf, n_dims, timesteps, parametrization, noise_schedule, noise_precision,
                          loss_type, norm_values, norm_biases, include_charges)
-        self.sampling_steps = 100
+        self.sampling_steps = 1
 
     def compute_loss(self, x, h, node_mask, edge_mask, context, t0_always, generative_model_ema=None, N=None, boundaries=None):
         """Computes an estimator for the variational lower bound, or the simple loss (MSE)."""
