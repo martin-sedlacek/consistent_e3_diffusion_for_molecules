@@ -8,6 +8,7 @@ from equivariant_diffusion import utils as diffusion_utils
 from equivariant_diffusion.en_diffusion import (PredefinedNoiseSchedule, GammaNetwork, sum_except_batch, expm1,
                                                 softplus, gaussian_KL, gaussian_KL_for_dimension,
                                                 cdf_standard_gaussian, EnVariationalDiffusion)
+from train_test import kerras_boundaries
 
 
 class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
@@ -27,24 +28,10 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
     ):
         super().__init__(dynamics, in_node_nf, n_dims, timesteps, parametrization, noise_schedule, noise_precision,
                          loss_type, norm_values, norm_biases, include_charges)
+        self.sampling_steps = 100
 
     def compute_loss(self, x, h, node_mask, edge_mask, context, t0_always, generative_model_ema=None, N=None, boundaries=None):
         """Computes an estimator for the variational lower bound, or the simple loss (MSE)."""
-
-        # This part is about whether to include loss term 0 always.
-        if t0_always:
-            # loss_term_0 will be computed separately.
-            # estimator = loss_0 + loss_t,  where t ~ U({1, ..., T})
-            lowest_t = 1
-        else:
-            # estimator = loss_t,           where t ~ U({0, ..., T})
-            lowest_t = 0
-
-        # Sample a timestep t.
-        #t_int = torch.randint(
-        #    lowest_t, self.T + 1, size=(x.size(0), 1), device=x.device).float()
-        #s_int = t_int - 1
-        #t_is_zero = (t_int == 0).float()  # Important to compute log p(x | z0).
 
         bs, n_nodes, n_dims = x.size()
         rand_int_t = torch.randint(0, N - 1, (bs, 1), device=x.device)
@@ -77,20 +64,25 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
         xh = torch.cat([x, h['categorical'], h['integer']], dim=2)
 
         # Sample z_t given x, h for timestep t, from q(z_t | x, h)
-        z_t = alpha_t * xh + sigma_t * eps
-        z_s = alpha_s * xh + sigma_s * eps
+        z_t = alpha_t * xh + sigma_t * eps  # t is more noisy than s, contains less signal
+        z_s = alpha_s * xh + sigma_s * eps  # vice versa
 
         diffusion_utils.assert_mean_zero_with_mask(z_t[:, :, :self.n_dims], node_mask)
         diffusion_utils.assert_mean_zero_with_mask(z_s[:, :, :self.n_dims], node_mask)
 
-        net_out = self.make_pred(z_t, t, t_int, node_mask, edge_mask, context)
+        net_out = self.make_pred(z_t, t, t_int, node_mask, edge_mask, context) # trainable model makes pred at time t
         with torch.no_grad():
             if self.training:
+                # ema makes prediction at the more informed / signal preserving time s
                 pred_ema = generative_model_ema.make_pred(z_s, s, s_int, node_mask, edge_mask, context)
             else:
                 pred_ema = xh
 
         # Compute the error.
+        # we want to force the prediction at less informaed time t to be the same as the prediction of the EMA model
+        # at the more informed time s.
+        # 1.) time s has more GT signal than t by default
+        # 2.) by comparing with the ema we want to make predictions consistent across time
         error = self.compute_error(net_out, gamma_t, pred_ema)
 
         if self.training and self.loss_type == 'l2':
@@ -112,7 +104,7 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
         # The KL between q(z1 | x) and p(z1) = Normal(0, 1). Should be close to zero.
         kl_prior = self.kl_prior(xh, node_mask)
 
-        # TODO: check this for ocnsistency
+        # TODO: check this for consistency
         # Combining the terms
         if t0_always:
             loss_t = loss_t_larger_than_zero
@@ -223,17 +215,36 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
         diffusion_utils.assert_mean_zero_with_mask(z[:, :, :self.n_dims], node_mask)
 
         # Iteratively sample p(z_s | z_t) for t = 1, ..., T, with s = t - 1.
-        #for s in reversed(range(0, self.T)):
-        s = 0  # TODO: this might be bullshit, idk how to sample properly here
-        s_array = torch.full((n_samples, 1), fill_value=s, device=z.device)
-        t_array = s_array + 1
-        s_array = s_array / self.T
-        t_array = t_array / self.T
+        boundaries = kerras_boundaries(5.0, self.boundary_eps, self.sampling_steps+1, self.T).to(z.device)
+        for s_idx in reversed(range(0, self.sampling_steps)):
+        # for s_int in reversed(range(0, self.T)):
+            # s_array = torch.full((n_samples, 1), fill_value=s, device=z.device)
+            #s_array = torch.full((n_samples, 1), fill_value=boundaries[s_idx], device=z.device)
+            #t_array = torch.full((n_samples, 1), fill_value=boundaries[s_idx+1], device=z.device)
+            # t_array = s_array + 1
+            #s_array = s_array / self.T
+            #t_array = t_array / self.T
+            #z = self.sample_p_zs_given_zt(s_array, t_array, z, node_mask, edge_mask, context, fix_noise=fix_noise)
 
-        z = self.sample_p_zs_given_zt(s_array, t_array, z, node_mask, edge_mask, context, fix_noise=fix_noise)
+            t_int = boundaries[s_idx + 1]
+            t_array = torch.full((n_samples, 1), fill_value=t_int, device=z.device)
+            t = t_array / self.T
+            z = self.make_pred(z, t, t_int, node_mask, edge_mask, context)
+            # Project down to avoid numerical runaway of the center of gravity.
+            z = torch.cat([diffusion_utils.remove_mean_with_mask(z[:, :, :self.n_dims], node_mask), z[:, :, self.n_dims:]], dim=2)
 
         # Finally sample p(x, h | z_0).
-        x, h = self.sample_p_xh_given_z0(z, node_mask, edge_mask, context, fix_noise=fix_noise)
+        #x, h = self.sample_p_xh_given_z0(z, node_mask, edge_mask, context, fix_noise=fix_noise)
+
+        xh = z
+        x = xh[:, :, :self.n_dims]
+
+        h_int = z[:, :, -1:] if self.include_charges else torch.zeros(0).to(z.device)
+        x, h_cat, h_int = self.unnormalize(x, z[:, :, self.n_dims:-1], h_int, node_mask)
+
+        h_cat = F.one_hot(torch.argmax(h_cat, dim=2), self.num_classes) * node_mask
+        h_int = torch.round(h_int).long() * node_mask
+        h = {'integer': h_int, 'categorical': h_cat}
 
         diffusion_utils.assert_mean_zero_with_mask(x, node_mask)
 
@@ -242,6 +253,86 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
             print(f'Warning cog drift with error {max_cog:.3f}. Projecting '
                   f'the positions down.')
             x = diffusion_utils.remove_mean_with_mask(x, node_mask)
+
+        return x, h
+
+    def sample_consistency(self, n_samples, n_nodes, node_mask, edge_mask, context, fix_noise=False):
+        if fix_noise:
+            # Noise is broadcasted over the batch axis, useful for visualizations.
+            z = self.sample_combined_position_feature_noise(1, n_nodes, node_mask)
+        else:
+            z = self.sample_combined_position_feature_noise(n_samples, n_nodes, node_mask)
+
+        diffusion_utils.assert_mean_zero_with_mask(z[:, :, :self.n_dims], node_mask)
+
+        # Iteratively sample p(z_s | z_t) for t = 1, ..., T, with s = t - 1.
+        boundaries = kerras_boundaries(5.0, self.boundary_eps, self.sampling_steps+1, self.T).to(z.device)
+        for s_idx in reversed(range(0, self.sampling_steps)):
+            #s_int = boundaries[s_idx]
+            # s_array = torch.full((n_samples, 1), fill_value=s_int, device=z.device)
+            # s = s_array / self.T
+            t_int = boundaries[s_idx+1]
+            t_array = torch.full((n_samples, 1), fill_value=t_int, device=z.device)
+            t = t_array / self.T
+
+            #gamma_s = self.gamma(s)
+            #gamma_t = self.gamma(t)
+
+            #sigma2_t_given_s, sigma_t_given_s, alpha_t_given_s = self.sigma_and_alpha_t_given_s(gamma_t, gamma_s, z)
+
+            #sigma_s = self.sigma(gamma_s, target_tensor=z)
+            #sigma_t = self.sigma(gamma_t, target_tensor=z)
+
+            # we do not do this in orgiginal smapling?
+            #alpha_t = self.alpha(gamma_t, x)
+            #alpha_s = self.alpha(gamma_s, x)
+
+            # Neural net prediction.
+            #net_out = self.phi(z, t, node_mask, edge_mask, context)
+
+            # Compute mu for p(zs | zt).
+            #diffusion_utils.assert_mean_zero_with_mask(z[:, :, :self.n_dims], node_mask)
+            #diffusion_utils.assert_mean_zero_with_mask(net_out[:, :, :self.n_dims], node_mask)
+
+            #mu = z / alpha_t_given_s - (sigma2_t_given_s / alpha_t_given_s / sigma_t) * net_out
+
+            # Compute sigma for p(zs | zt).
+            #sigma = sigma_t_given_s * sigma_s / sigma_t
+
+            # Sample zs given the paramters derived from zt.
+            #bs = 1 if fix_noise else mu.size(0)
+            #eps = self.sample_combined_position_feature_noise(bs, mu.size(1), node_mask)
+            #z = mu + sigma * eps
+
+            #orig_eps = 0.00000001  # 0.002
+            #t = t_int - orig_eps
+            #c_skip_t = 0.25 / (t.pow(2) + 0.25)
+            #c_out_t = 0.25 * t / ((t + orig_eps).pow(2) + 0.25).pow(0.5)
+            #z = c_skip_t[:, :, None] * z + c_out_t[:, :, None] * net_out
+
+            z = self.make_pred(z, t, t_int, node_mask, edge_mask, context)
+
+            # Project down to avoid numerical runaway of the center of gravity.
+            z = torch.cat([diffusion_utils.remove_mean_with_mask(z[:, :, :self.n_dims], node_mask), z[:, :, self.n_dims:]], dim=2)
+
+        #zeros = torch.zeros(size=(z.size(0), 1), device=z.device)
+        #gamma_0 = self.gamma(zeros)
+        # Computes sqrt(sigma_0^2 / alpha_0^2)
+        #sigma_x = self.SNR(-0.5 * gamma_0).unsqueeze(1)
+        #net_out = self.phi(z, zeros, node_mask, edge_mask, context)
+
+        #bs = 1 if fix_noise else net_out.size(0)
+        #eps = self.sample_combined_position_feature_noise(bs, net_out.size(1), node_mask)
+        xh = z #net_out + sigma_x * eps
+
+        x = xh[:, :, :self.n_dims]
+
+        h_int = z[:, :, -1:] if self.include_charges else torch.zeros(0).to(z.device)
+        x, h_cat, h_int = self.unnormalize(x, z[:, :, self.n_dims:-1], h_int, node_mask)
+
+        h_cat = F.one_hot(torch.argmax(h_cat, dim=2), self.num_classes) * node_mask
+        h_int = torch.round(h_int).long() * node_mask
+        h = {'integer': h_int, 'categorical': h_cat}
 
         return x, h
 
@@ -262,23 +353,45 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
         chain = torch.zeros((keep_frames,) + z.size(), device=z.device)
 
         # Iteratively sample p(z_s | z_t) for t = 1, ..., T, with s = t - 1.
-        #for s in reversed(range(0, self.T)):
-        s = 0 # TODO: again is this BS or can I do it like this in consistency?
-        s_array = torch.full((n_samples, 1), fill_value=s, device=z.device)
-        t_array = s_array + 1
-        s_array = s_array / self.T
-        t_array = t_array / self.T
+        boundaries = kerras_boundaries(5.0, self.boundary_eps, self.sampling_steps + 1, self.T).to(z.device)
+        for s_int in reversed(range(0, self.sampling_steps)):
+        #for s_int in reversed(range(0, self.T)):
+            #s_array = torch.full((n_samples, 1), fill_value=s, device=z.device)
+            #s_array = torch.full((n_samples, 1), fill_value=boundaries[s_int], device=z.device)
+            #t_array = torch.full((n_samples, 1), fill_value=boundaries[s_int+1], device=z.device)
+            #t_array = s_array + 1
+            #s_array = s_array / self.T
+            #t_array = t_array / self.T
+            #z = self.sample_p_zs_given_zt(s_array, t_array, z, node_mask, edge_mask, context)
 
-        z = self.sample_p_zs_given_zt(s_array, t_array, z, node_mask, edge_mask, context)
+            t_int = boundaries[s_int + 1]
+            t_array = torch.full((n_samples, 1), fill_value=t_int, device=z.device)
+            t = t_array / self.T
+            z = self.make_pred(z, t, t_int, node_mask, edge_mask, context)
+            # Project down to avoid numerical runaway of the center of gravity.
+            z = torch.cat([diffusion_utils.remove_mean_with_mask(z[:, :, :self.n_dims], node_mask), z[:, :, self.n_dims:]],
+                          dim=2)
 
-        diffusion_utils.assert_mean_zero_with_mask(z[:, :, :self.n_dims], node_mask)
+            diffusion_utils.assert_mean_zero_with_mask(z[:, :, :self.n_dims], node_mask)
 
-        # Write to chain tensor.
-        write_index = (s * keep_frames) // self.T
-        chain[write_index] = self.unnormalize_z(z, node_mask)
+            # Write to chain tensor.
+            write_index = (boundaries[s_int] * keep_frames) // self.T
+            #write_index = (s * keep_frames) // self.T
+            chain[write_index] = self.unnormalize_z(z, node_mask)
 
         # Finally sample p(x, h | z_0).
-        x, h = self.sample_p_xh_given_z0(z, node_mask, edge_mask, context)
+        xh = z #net_out + sigma_x * eps
+
+        x = xh[:, :, :self.n_dims]
+
+        h_int = z[:, :, -1:] if self.include_charges else torch.zeros(0).to(z.device)
+        x, h_cat, h_int = self.unnormalize(x, z[:, :, self.n_dims:-1], h_int, node_mask)
+
+        h_cat = F.one_hot(torch.argmax(h_cat, dim=2), self.num_classes) * node_mask
+        h_int = torch.round(h_int).long() * node_mask
+        h = {'integer': h_int, 'categorical': h_cat}
+
+        #x, h = self.sample_p_xh_given_z0(z, node_mask, edge_mask, context)
 
         diffusion_utils.assert_mean_zero_with_mask(x[:, :, :self.n_dims], node_mask)
 
