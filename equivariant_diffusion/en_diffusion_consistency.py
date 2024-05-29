@@ -168,6 +168,8 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
         t = t_int - orig_eps  # should we use t_int or something else?
         c_skip_t = 0.25 / (t.pow(2) + 0.25)
         c_out_t = 0.25 * t / ((t + orig_eps).pow(2) + 0.25).pow(0.5)
+        #print(z_t.shape, net_out.shape)
+        #print(c_skip_t[:, :, None].shape, c_out_t[:, :, None].shape)
         net_out = c_skip_t[:, :, None] * z_t + c_out_t[:, :, None] * net_out
         return net_out
 
@@ -215,7 +217,8 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
         diffusion_utils.assert_mean_zero_with_mask(z[:, :, :self.n_dims], node_mask)
 
         # Iteratively sample p(z_s | z_t) for t = 1, ..., T, with s = t - 1.
-        boundaries = kerras_boundaries(5.0, self.boundary_eps, self.sampling_steps+1, self.T).to(z.device)
+        boundary_eps = 0.00000001
+        boundaries = kerras_boundaries(5.0, boundary_eps, self.sampling_steps+1, self.T).to(z.device)
         for s_idx in reversed(range(0, self.sampling_steps)):
         # for s_int in reversed(range(0, self.T)):
             # s_array = torch.full((n_samples, 1), fill_value=s, device=z.device)
@@ -229,7 +232,7 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
             t_int = boundaries[s_idx + 1]
             t_array = torch.full((n_samples, 1), fill_value=t_int, device=z.device)
             t = t_array / self.T
-            z = self.make_pred(z, t, t_int, node_mask, edge_mask, context)
+            z = self.make_pred(z, t, t_array, node_mask, edge_mask, context)
             # Project down to avoid numerical runaway of the center of gravity.
             z = torch.cat([diffusion_utils.remove_mean_with_mask(z[:, :, :self.n_dims], node_mask), z[:, :, self.n_dims:]], dim=2)
 
@@ -266,14 +269,15 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
         diffusion_utils.assert_mean_zero_with_mask(z[:, :, :self.n_dims], node_mask)
 
         # Iteratively sample p(z_s | z_t) for t = 1, ..., T, with s = t - 1.
-        boundaries = kerras_boundaries(5.0, self.boundary_eps, self.sampling_steps+1, self.T).to(z.device)
+        boundary_eps = 0.00000001
+        boundaries = kerras_boundaries(5.0, boundary_eps, self.sampling_steps+1, self.T).to(z.device)
         for s_idx in reversed(range(0, self.sampling_steps)):
             #s_int = boundaries[s_idx]
             # s_array = torch.full((n_samples, 1), fill_value=s_int, device=z.device)
             # s = s_array / self.T
             t_int = boundaries[s_idx+1]
-            t_array = torch.full((n_samples, 1), fill_value=t_int, device=z.device)
-            t = t_array / self.T
+            #t_array = torch.full((n_samples, 1), fill_value=t_int, device=z.device)
+            t = t_int / self.T
 
             #gamma_s = self.gamma(s)
             #gamma_t = self.gamma(t)
@@ -353,7 +357,8 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
         chain = torch.zeros((keep_frames,) + z.size(), device=z.device)
 
         # Iteratively sample p(z_s | z_t) for t = 1, ..., T, with s = t - 1.
-        boundaries = kerras_boundaries(5.0, self.boundary_eps, self.sampling_steps + 1, self.T).to(z.device)
+        boundary_eps = 0.00000001
+        boundaries = kerras_boundaries(5.0, boundary_eps, self.sampling_steps + 1, self.T).to(z.device)
         for s_int in reversed(range(0, self.sampling_steps)):
         #for s_int in reversed(range(0, self.T)):
             #s_array = torch.full((n_samples, 1), fill_value=s, device=z.device)
@@ -367,7 +372,7 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
             t_int = boundaries[s_int + 1]
             t_array = torch.full((n_samples, 1), fill_value=t_int, device=z.device)
             t = t_array / self.T
-            z = self.make_pred(z, t, t_int, node_mask, edge_mask, context)
+            z = self.make_pred(z, t, t_array, node_mask, edge_mask, context)
             # Project down to avoid numerical runaway of the center of gravity.
             z = torch.cat([diffusion_utils.remove_mean_with_mask(z[:, :, :self.n_dims], node_mask), z[:, :, self.n_dims:]],
                           dim=2)
@@ -375,7 +380,7 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
             diffusion_utils.assert_mean_zero_with_mask(z[:, :, :self.n_dims], node_mask)
 
             # Write to chain tensor.
-            write_index = (boundaries[s_int] * keep_frames) // self.T
+            write_index = int(((boundaries[s_int] * keep_frames) // self.T).item())
             #write_index = (s * keep_frames) // self.T
             chain[write_index] = self.unnormalize_z(z, node_mask)
 
