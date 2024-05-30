@@ -31,8 +31,8 @@ def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dt
     n_iterations = len(loader)
     for i, data in tqdm.tqdm(enumerate(loader)):
         # TODO; remove debug breaker
-        #if i == 200:
-        #    break
+        if i == 100:
+            break
         x = data['positions'].to(device, dtype)
         node_mask = data['atom_mask'].to(device, dtype).unsqueeze(2)
         edge_mask = data['edge_mask'].to(device, dtype)
@@ -126,8 +126,8 @@ def test(args, loader, epoch, eval_model, device, dtype, property_norms, nodes_d
 
         for i, data in enumerate(loader):
             # TODO remove breaker
-            #if i == 100:
-            #    break
+            if i == 10:
+                break
             x = data['positions'].to(device, dtype)
             batch_size = x.size(0)
             node_mask = data['atom_mask'].to(device, dtype).unsqueeze(2)
@@ -157,13 +157,6 @@ def test(args, loader, epoch, eval_model, device, dtype, property_norms, nodes_d
             # transform batch through flow
             if args.consistency:
                 from equivariant_diffusion.en_diffusion_consistency import DummyTestingEMA
-                test_ema = DummyTestingEMA(
-                    n_dims=eval_model.n_dims,
-                    loss_type=eval_model.loss_type,
-                    norm_values=eval_model.norm_values,
-                    norm_biases=eval_model.norm_biases,
-                    include_charges=eval_model.include_charges
-                )
                 nll, _, _ = losses.compute_loss_and_nll(args, eval_model, nodes_dist, x, h, node_mask, edge_mask, context,
                                                         generative_model_ema=None, boundaries=boundaries, N=N)
             else:

@@ -98,14 +98,15 @@ def test(args, flow_dp, nodes_dist, device, dtype, loader, partition='Test', num
                 # transform batch through flow
                 if args.consistency:
                     from equivariant_diffusion.en_diffusion_consistency import DummyTestingEMA
-                    test_ema = DummyTestingEMA(
-                        n_dims=flow_dp.n_dims,
-                        loss_type=flow_dp.loss_type,
-                        norm_values=flow_dp.norm_values,
-                        norm_biases=flow_dp.norm_biases,
-                        include_charges=flow_dp.include_charges
-                    )
-                    nll, _, _ = losses.compute_loss_and_nll(args, flow_dp, nodes_dist, x, h, node_mask, edge_mask, context, generative_model_ema=test_ema, boundaries=boundaries, N=N)
+                    #test_ema = DummyTestingEMA(
+                    #    n_dims=flow_dp.n_dims,
+                    #    loss_type=flow_dp.loss_type,
+                    #    norm_values=flow_dp.norm_values,
+                    #    norm_biases=flow_dp.norm_biases,
+                    #    include_charges=flow_dp.include_charges
+                    #)
+                    nll, _, _ = losses.compute_loss_and_nll(args, flow_dp, nodes_dist, x, h, node_mask, edge_mask, context,
+                                                            generative_model_ema=None, boundaries=boundaries, N=N)
                 else:
                     nll, _, _ = losses.compute_loss_and_nll(args, flow_dp, nodes_dist, x, h, node_mask,
                                                         edge_mask, context)

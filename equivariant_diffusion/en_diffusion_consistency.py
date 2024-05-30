@@ -28,7 +28,7 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
     ):
         super().__init__(dynamics, in_node_nf, n_dims, timesteps, parametrization, noise_schedule, noise_precision,
                          loss_type, norm_values, norm_biases, include_charges)
-        self.sampling_steps = 1
+        self.sampling_steps = 10
 
     def compute_loss(self, x, h, node_mask, edge_mask, context, t0_always, generative_model_ema=None, N=None, boundaries=None):
         """Computes an estimator for the variational lower bound, or the simple loss (MSE)."""
@@ -168,8 +168,7 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
         t = t_int - orig_eps  # should we use t_int or something else?
         c_skip_t = 0.25 / (t.pow(2) + 0.25)
         c_out_t = 0.25 * t / ((t + orig_eps).pow(2) + 0.25).pow(0.5)
-        #print(z_t.shape, net_out.shape)
-        #print(c_skip_t[:, :, None].shape, c_out_t[:, :, None].shape)
+        print(t[0], c_skip_t[0], c_out_t[0])
         net_out = c_skip_t[:, :, None] * z_t + c_out_t[:, :, None] * net_out
         return net_out
 
