@@ -31,7 +31,7 @@ def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dt
     n_iterations = len(loader)
     for i, data in tqdm.tqdm(enumerate(loader)):
         # TODO; remove debug breaker
-        #if i == 100:
+        #if i == 200:
         #    break
         x = data['positions'].to(device, dtype)
         node_mask = data['atom_mask'].to(device, dtype).unsqueeze(2)

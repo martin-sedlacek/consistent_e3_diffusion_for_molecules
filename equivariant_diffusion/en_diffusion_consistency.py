@@ -215,11 +215,11 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
         diffusion_utils.assert_mean_zero_with_mask(z[:, :, :self.n_dims], node_mask)
 
         # Scale noise by T (consistency)
-        z = z * self.T
+        #z = z * self.T**2
 
         # Iteratively sample p(z_s | z_t) for t = 1, ..., T, with s = t - 1.
         boundary_eps = 0.00000001
-        boundaries = kerras_boundaries(5.0, boundary_eps, self.sampling_steps+1, self.T).to(z.device)
+        boundaries = kerras_boundaries(5.0, boundary_eps, self.sampling_steps, self.T).to(z.device)
         for idx in reversed(range(0, self.sampling_steps)):
         # for s_int in reversed(range(0, self.T)):
             # s_array = torch.full((n_samples, 1), fill_value=s, device=z.device)
@@ -230,14 +230,18 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
             #t_array = t_array / self.T
             #z = self.sample_p_zs_given_zt(s_array, t_array, z, node_mask, edge_mask, context, fix_noise=fix_noise)
 
-            t_val = boundaries[idx + 1]
+            t_val = boundaries[idx]
             t_array = torch.full((n_samples, 1), fill_value=t_val, device=z.device)
             t_array_normalized = t_array / self.T
 
             # inject gaussian noise with schedule during multi-step sampling
             # eps = torch.randn_like(z)
             eps = self.sample_combined_position_feature_noise(1 if fix_noise else n_samples, n_nodes, node_mask)
-            z = z + math.sqrt(t_val**2 - boundary_eps**2) * eps
+            #z = z + math.sqrt(t_val**2 - boundary_eps**2) * eps
+            gamma_t = self.inflate_batch_array(self.gamma(t_array_normalized), z)
+            alpha_t = self.alpha(gamma_t, z)
+            sigma_t = self.sigma(gamma_t, z)
+            z = alpha_t * z + sigma_t * eps
 
             z = self.make_pred(z, t_array_normalized, t_array, node_mask, edge_mask, context)
             # Project down to avoid numerical runaway of the center of gravity.
@@ -356,7 +360,7 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
         z = self.sample_combined_position_feature_noise(n_samples, n_nodes, node_mask)
 
         # Scale noise by T (consistency)
-        z = z * self.T
+        # z = z * self.T**2
 
         diffusion_utils.assert_mean_zero_with_mask(z[:, :, :self.n_dims], node_mask)
 
@@ -385,7 +389,11 @@ class ConsistentEnVariationalDiffusion(EnVariationalDiffusion):
 
             # eps = torch.randn_like(z)
             eps = self.sample_combined_position_feature_noise(n_samples, n_nodes, node_mask)
-            z = z + math.sqrt(t_val ** 2 - boundary_eps ** 2) * eps
+            #z = z + math.sqrt(t_val ** 2 - boundary_eps ** 2) * eps
+            gamma_t = self.inflate_batch_array(self.gamma(t_array_normalised), z)
+            alpha_t = self.alpha(gamma_t, z)
+            sigma_t = self.sigma(gamma_t, z)
+            z = alpha_t * z + sigma_t * eps
 
             z = self.make_pred(z, t_array_normalised, t_array, node_mask, edge_mask, context)
             # Project down to avoid numerical runaway of the center of gravity.
